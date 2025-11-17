@@ -1,134 +1,136 @@
-﻿# 🔒 AppGate
+﻿# AppGate – IP Firewall Orchestrator
 
-AppGate is a Windows command‑line utility written in modern C++17 that manages application network access using the Windows Filtering Platform (WFP). It helps you identify apps using the network and block or unblock them preemptively by executable path.
+AppGate is a Windows command-line firewall assistant built on the Windows Filtering Platform (WFP). It lets you block or whitelist IPv4/IPv6 endpoints, optionally narrowing the scope to individual TCP/UDP ports. The tool runs entirely in the console, exposes both blacklist and whitelist workflows, and installs only in-memory (dynamic) WFP state so all filters vanish when AppGate exits.
 
-Key capabilities
-- 📡 List processes currently using the network (grouped by PID with CSV of ports)
-- 🧭 Enumerate installed applications (Registry, UWP, filesystem, running processes)
-- 🚫/✅ Block or unblock applications by path or PID using WFP AppID filters
-- 🧰 Show and remove rules created during the session
+## Highlights
+- **Two enforcement modes** – traditional blacklist blocking or a whitelist “default deny” mode where all traffic is blocked unless explicitly opened.
+- **IPv4 + IPv6** – every filter is installed for both protocol families and for inbound/outbound transport layers.
+- **Per-port control** – block or allow the whole IP, or specify exact TCP/UDP ports (e.g., `443 8443`).
+- **File-driven automation** – load `blockIPs.txt` or `white.txt` to bulk apply rules, including per-port entries.
+- **Interactive management** – inspect managed rules, edit an existing IP, switch between “all ports” and “selected ports”, or remove individual port allowances.
+- **Safe by default** – whitelist mode automatically installs blanket block filters before any IP is opened, ensuring no traffic slips through.
 
-Supported platforms: Windows 10/11 (x64)
-Build toolchain: MSVC + CMake (≥ 3.15) + Ninja
-
----
-
-## 📸 Demo (CLI)
-```
-===================================================
-  ___              _____       _       
- / _ \            |  __ \     | |      
-/ /_\ \_ __  _ __ | |  \/ __ _| |_ ___ 
-|  _  | '_ \| '_ \| | __ / _` | __/ _ \
-| | | | |_) | |_) | |_\ \ (_| | ||  __/
-\_| |_/ .__/| .__/ \____/\__,_|\__\___|
-      | |   | |                        
-      |_|   |_|                        
-                     AppGate
-        Application Network Access Controller
-=====================================================
-
-1. List processes using network
-2. List installed applications
-3. Block process (by PID or Path)
-4. Unblock process (by PID or Path)
-5. Show active rules
-6. Delete rule by serial number
-7. Delete all rules created by this program
-0. Exit
-```
+Supported OS: Windows 10/11 x64 · Toolchain: MSVC, CMake ≥ 3.15, Ninja or MSBuild
 
 ---
 
-## 🧠 Overview
-AppGate opens a dynamic WFP session and adds allow/deny rules tied to a dedicated sublayer. Rules match applications by their AppID (derived from the executable path) and protocol. This allows proactive (path‑based) enforcement before a process starts.
+## Architecture in brief
+- **Dynamic WFP session** – created at startup (`FWPM_SESSION_FLAG_DYNAMIC`) so filters are removed automatically on exit.
+- **Custom sublayer** – isolates AppGate-managed filters from other firewall tooling.
+- **Layers covered**:
+  - Outbound: `FWPM_LAYER_ALE_AUTH_CONNECT_V4/V6`, `FWPM_LAYER_OUTBOUND_TRANSPORT_V4/V6`
+  - Inbound: `FWPM_LAYER_ALE_AUTH_RECV_ACCEPT_V4/V6`, `FWPM_LAYER_INBOUND_TRANSPORT_V4/V6`
+- **Whitelist default deny** – installs “block everything” filters first, then adds higher-weight permit filters for approved IP/port combinations.
+- **Rule inventory** – `FirewallManager` tracks serial numbers, filter ids, and per-port state so the CLI can edit or remove rules safely.
 
-Typical scenarios
-- 🔍 Identify which apps are actively connected and on which ports
-- ⛔ Block a specific program from any network access, inbound/outbound
-- 🛡️ Prepare path‑based blocks for software you do not want to access the network
+---
 
-## 🏗️ Architecture
-- WFP session: `FWPM_SESSION_FLAG_DYNAMIC`; rules are removed when the tool exits
-- Sublayer: custom sublayer for AppGate
-- Layers and conditions used:
-  - Layers: `ALE_AUTH_CONNECT_V4/V6` (outbound), `ALE_AUTH_RECV_ACCEPT_V4/V6` (inbound)
-  - Conditions: `ALE_APP_ID` (from `FwpmGetAppIdFromFileName0`), `IP_PROTOCOL` (TCP, UDP)
-- Discovery:
-  - Network processes: `GetExtendedTcpTable` (IPv4/IPv6)
-  - Installed apps: Registry Uninstall keys, Start Menu shortcuts, filesystem scan, running processes, UWP via PowerShell
-- Encoding: wide‑string (UTF‑16) for WFP/AppID; UTF‑8 for display
+## Prerequisites
+- Windows 10/11 (x64) with administrator rights
+- Visual Studio 2019 or 2022 (Desktop development with C++)
+- Windows SDK (installed with VS)
+- CMake 3.15+ and either Ninja or MSBuild
+- Git (optional, for cloning the repo)
 
-## 🧰 Requirements
-- Windows 10/11 (x64)
-- Visual Studio 2019/2022 with “Desktop development with C++”
-- Windows 10/11 SDK (installed with VS)
-- CMake 3.15+ and Ninja
-- PowerShell (built‑in) for UWP package enumeration
+---
 
-## ⬇️ Get the source
-- Clone (recommended):
-```bash
+## Building AppGate
+> Run these commands from a *Developer Command Prompt for VS* (x64) so MSVC and the Windows SDK are on `PATH`.
+
+### Ninja (recommended)
+```bat
 git clone https://github.com/MAS191/AppGate.git
 cd AppGate
+cmake -S . -B build -G Ninja
+cmake --build build
 ```
-- Or download ZIP: GitHub → Code → Download ZIP, then extract.
 
-## 🛠️ Build
-Use a “Developer Command Prompt for VS (x64)” to ensure MSVC and the Windows SDK are on PATH.
+### Visual Studio generator
+```bat
+git clone https://github.com/MAS191/AppGate.git
+cd AppGate
+cmake -S . -B build -G "Visual Studio 17 2022" -A x64
+cmake --build build --config Release
+```
 
-Ninja (recommended)
-```bat
-mkdir build && cd build
-cmake -G Ninja ..
-ninja
-```
-Visual Studio generator (alternative)
-```bat
-mkdir build && cd build
-cmake -G "Visual Studio 17 2022" -A x64 ..
-cmake --build . --config Release
-```
-Output
+Build output:
 - Ninja: `build\AppGate.exe`
-- VS: `build\Release\AppGate.exe`
+- MSBuild: `build\Release\AppGate.exe`
 
-## 🔐 Run (Administrator)
-WFP requires elevation. Launch in one of the following ways:
-- File Explorer: Right‑click `AppGate.exe` → Run as administrator
-- PowerShell (from the `build` folder):
-  ```powershell
-  Start-Process -FilePath .\AppGate.exe -Verb RunAs
-  ```
-- Command Prompt: open the terminal itself as Administrator, then run `AppGate.exe`
+---
 
-If you see `Failed to initialize WFP engine. Run as Administrator.`, the process is not elevated.
+## Running (Administrator required)
+WFP calls fail without elevation. Launch AppGate one of these ways:
 
-## 🚀 Quick usage
-On launch, a menu appears. The most common actions:
-- 1️⃣ List processes using network: one row per PID with CSV local/remote ports
-- 2️⃣ List installed applications: aggregated from registry/UWP/filesystem/processes; select a row to block/unblock by path
-- 3️⃣/4️⃣ Block/Unblock by PID or by full path directly
-- 5️⃣–7️⃣ Inspect or delete rules created by AppGate in this session
+```powershell
+# From the build directory
+Start-Process -FilePath .\AppGate.exe -Verb RunAs
+```
 
-See the full guide in `AppGate/usage.md` for examples and details.
+or open a terminal as Administrator first, then execute `AppGate.exe` directly. If initialization prints `[!] Failed to initialize firewall manager`, the process is not elevated or the Base Filtering Engine (BFE) service is stopped.
 
-## 🛠 Troubleshooting
-- Build fails due to compiler/SDK not found: use a Developer Command Prompt (x64) and ensure the Windows SDK is installed
-- Initialization error: run elevated; verify the “Base Filtering Engine (BFE)” service is running
-- UWP apps missing: PowerShell must be available; per‑process `-ExecutionPolicy Bypass` is used, but enterprise policy might restrict this
-- Non‑ASCII paths display incorrectly: switch console to UTF‑8 with `chcp 65001`
-- No entries in process list: only active TCP connections are listed; idle or UDP‑only processes may not appear
+---
 
-## 🗂️ Project layout
-- `main.cpp` — CLI entry point and menu
-- `ProcessManager.h/.cpp` — Network process enumeration (TCP v4/v6), grouped output
-- `InstalledAppsManager.h/.cpp` — Installed app discovery (Registry, UWP, filesystem, processes)
-- `FirewallManager.h/.cpp` — WFP engine/session/sublayer and filter management
-- `Utils.h/.cpp` — Helpers (GUID, error, formatting, conversions)
-- `ApplicationInfo.h` — Installed application model
-- `CMakeLists.txt` — Build configuration
+## Modes & workflow
 
-## 📄 License
-MIT — see `AppGate/LICENSE`.
+### Blacklist mode (default)
+- Only the IPs you add are blocked.
+- Blocking can target *all* ports or individual ports per IP.
+- Useful for quickly cutting off abusive hosts while leaving the rest of the network untouched.
+
+### Whitelist mode (default deny)
+- AppGate first installs global block filters that drop every inbound/outbound connection.
+- You must explicitly whitelist IPs and (optionally) ports before traffic flows.
+- Choose between “allow all ports” or an exact port list for each address. The CLI enforces that selection when adding, editing, or importing entries.
+
+Switch modes from the opening prompt. Leaving whitelist mode removes the default-deny filters and clears managed whitelist entries.
+
+---
+
+## CLI reference
+Main menu options (labels differ slightly between modes):
+
+1. **Whitelist/Block IP Address** – prompt for an IP, then choose `all` or specific ports to allow/block.
+2. **Remove Whitelisted/Unblock IP** – delete an existing rule entirely.
+3. **Load Whitelist / Load Block List** – import from a file (`white.txt` for whitelist mode or a custom path/default `blockIPs.txt` for blacklist mode).
+4. **Manage Whitelisted/Blocked IPs** – open an editor for any managed IP to toggle “all ports”, add or remove specific ports, or delete the entry.
+5. **Show Rules** – tabular view of every AppGate-managed rule with serial, IP, type, and details.
+6. **Clear Managed Rules** – remove every rule AppGate created in the current session (whitelist mode keeps the background default-deny filters so the network stays blocked).
+7. **Exit** – closes AppGate, automatically removing all dynamic filters.
+
+### File formats
+- **Blacklist** (`blockIPs.txt` by default): each line `IP [port ...]`. Use keywords `all`, `any`, or `*` to block every port.
+- **Whitelist** (`white.txt`): each line must specify either `IP all` or `IP port1 port2 ...`. Invalid ports are rejected with a warning, and the line is skipped.
+- Lines starting with `#` are treated as comments.
+
+### Managing existing IPs
+Use option 4 to pick an IP (by serial number or literal address). The editor lets you:
+- Switch between “all ports” and per-port mode.
+- Add allowed/blocked ports using the same token syntax as when adding a new IP.
+- Remove an individual port allowance/block without deleting the whole entry.
+- Remove the IP entirely from the current mode.
+
+---
+
+## Troubleshooting
+- **Initialization failure** – verify you launched as Administrator and that the Windows “Base Filtering Engine” service is running.
+- **Whitelist mode still allows traffic** – ensure you actually whitelisted the destination IP/port; any other traffic remains blocked by the default filters.
+- **Cannot delete a filter** – rules are tracked by serial number; refresh with “Show Rules” to confirm the IP still exists before removing.
+- **IPv6 formatting** – enter IPv6 addresses in standard notation (e.g., `2606:4700:4700::1111`). AppGate automatically picks the correct WFP layers.
+- **Build errors** – confirm CMake is pointed at the VS generator that matches your installed toolset, and reinstall the Windows SDK if headers are missing.
+
+---
+
+## Project layout
+- `main.cpp` – CLI menus, prompts, and file import/export logic.
+- `FirewallManager.h/.cpp` – WFP session management plus block/whitelist filter orchestration.
+- `Models.h` – rule/port metadata stored in memory for editing.
+- `Utils.*` – helper utilities (string conversions, GUID helpers, etc.).
+- `blockIPs.txt`, `white.txt` – sample lists for batch operations.
+- `usage.md` – legacy/extended usage notes.
+
+---
+
+## License
+AppGate is released under the MIT License – see `LICENSE` for the full text.
 
