@@ -53,4 +53,70 @@ namespace Utils {
         if (len > 0) WideCharToMultiByte(CP_UTF8, 0, w.c_str(), -1, s.data(), len, NULL, NULL);
         return s;
     }
+
+    bool TestIPConnectivity(const std::string& ipAddress, int timeoutMs) {
+        // Try to create a TCP connection to test if IP is reachable
+        // If blocked by firewall, connection should fail
+        SOCKET sock = INVALID_SOCKET;
+        struct addrinfo hints = {}, *result = nullptr;
+        
+        hints.ai_family = AF_UNSPEC;     // IPv4 or IPv6
+        hints.ai_socktype = SOCK_STREAM; // TCP
+        hints.ai_protocol = IPPROTO_TCP;
+        
+        // Try to resolve the IP address
+        int res = getaddrinfo(ipAddress.c_str(), "80", &hints, &result);
+        if (res != 0) {
+            // Try port 443 if 80 fails
+            res = getaddrinfo(ipAddress.c_str(), "443", &hints, &result);
+            if (res != 0) {
+                return false; // Can't resolve - treat as blocked
+            }
+        }
+        
+        bool connected = false;
+        for (auto ptr = result; ptr != nullptr; ptr = ptr->ai_next) {
+            sock = socket(ptr->ai_family, ptr->ai_socktype, ptr->ai_protocol);
+            if (sock == INVALID_SOCKET) {
+                continue;
+            }
+            
+            // Set socket to non-blocking for timeout control
+            u_long mode = 1;
+            ioctlsocket(sock, FIONBIO, &mode);
+            
+            // Attempt to connect
+            connect(sock, ptr->ai_addr, (int)ptr->ai_addrlen);
+            
+            // Wait for connection or timeout
+            fd_set writefds;
+            FD_ZERO(&writefds);
+            FD_SET(sock, &writefds);
+            
+            struct timeval tv;
+            tv.tv_sec = timeoutMs / 1000;
+            tv.tv_usec = (timeoutMs % 1000) * 1000;
+            
+            int selectRes = select(0, nullptr, &writefds, nullptr, &tv);
+            if (selectRes > 0) {
+                // Check if connection succeeded
+                int error = 0;
+                int errorLen = sizeof(error);
+                getsockopt(sock, SOL_SOCKET, SO_ERROR, (char*)&error, &errorLen);
+                if (error == 0) {
+                    connected = true;
+                    closesocket(sock);
+                    break;
+                }
+            }
+            
+            closesocket(sock);
+        }
+        
+        if (result) {
+            freeaddrinfo(result);
+        }
+        
+        return connected;
+    }
 }

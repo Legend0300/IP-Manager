@@ -1,240 +1,883 @@
-﻿// main.cpp
-// Entry point and CLI menu for AppGate
-#include <iostream>
-#include <iomanip>
+// main.cpp
+// CLI supporting blacklist and whitelist workflows for IP control
+#ifndef NOMINMAX
+#define NOMINMAX
+#endif
 #include <algorithm>
+#include <cctype>
 #include <cstddef>
-#include <vector>
+#include <fstream>
+#include <iomanip>
+#include <iostream>
+#include <set>
 #include <sstream>
-#include "ProcessManager.h"
+#include <string>
+#include <vector>
+
 #include "FirewallManager.h"
 #include "Models.h"
-#include "Utils.h"
-#include "InstalledAppsManager.h"
-#include "ApplicationInfo.h"
+
+enum class FirewallMode { Blacklist, Whitelist };
 
 void PrintBanner();
-void PrintMenu();
-void ListProcesses(ProcessManager& pm);
-void ListInstalledApps(InstalledAppsManager& iam, FirewallManager& fm);
-void BlockProcess(FirewallManager& fm, ProcessManager& pm);
-void UnblockProcess(FirewallManager& fm, ProcessManager& pm);
+FirewallMode PromptMode(FirewallManager& fm);
+void PrintMenu(FirewallMode mode);
+void HandleAddIP(FirewallManager& fm, FirewallMode mode);
+void HandleRemoveIP(FirewallManager& fm, FirewallMode mode);
+void HandleIPsFromFile(FirewallManager& fm, FirewallMode mode);
 void ShowRules(FirewallManager& fm);
-void DeleteRuleBySerial(FirewallManager& fm);
-void DeleteAllRules(FirewallManager& fm);
+void ClearAllRules(FirewallManager& fm, FirewallMode mode);
+void ManageBlockedIPs(FirewallManager& fm);
+void EditBlockedIP(FirewallManager& fm, const std::string& ipAddress);
+std::string DescribeBlockedPorts(const RuleEntry& rule);
+void ManageWhitelistedIPs(FirewallManager& fm);
+void EditWhitelistedIP(FirewallManager& fm, const std::string& ipAddress);
+std::string DescribeAllowedPorts(const RuleEntry& rule);
 
-static std::string JoinCSV(const std::vector<std::string>& v) {
-    std::ostringstream oss; bool first=true; for (auto& s : v){ if(!first) oss<<","; oss<<s; first=false; } return oss.str();
+struct WhitelistPortsRequest {
+	bool allowAll = false;
+	std::vector<std::uint16_t> ports;
+};
+
+enum class PortPromptResult { Success, Cancel };
+
+static std::string ToLowerCopy(std::string value) {
+	std::transform(value.begin(), value.end(), value.begin(),
+		[](unsigned char ch) { return static_cast<char>(std::tolower(ch)); });
+	return value;
+}
+
+static std::vector<std::string> Tokenize(const std::string& input) {
+	std::istringstream iss(input);
+	std::vector<std::string> tokens;
+	std::string token;
+	while (iss >> token) {
+		tokens.push_back(token);
+	}
+	return tokens;
+}
+
+static bool ParseWhitelistPortTokens(const std::vector<std::string>& tokens,
+	WhitelistPortsRequest& request,
+	std::string& error) {
+	if (tokens.empty()) {
+		error = "Provide 'all' or at least one port number.";
+		return false;
+	}
+
+	bool allowAll = false;
+	std::set<std::uint16_t> dedup;
+
+	for (const auto& token : tokens) {
+		std::string lower = ToLowerCopy(token);
+		if (lower == "all" || lower == "any" || lower == "*") {
+			allowAll = true;
+			break;
+		}
+
+		int value = 0;
+		try {
+			value = std::stoi(token);
+		} catch (...) {
+			error = "Invalid port '" + token + "'.";
+			return false;
+		}
+
+		if (value <= 0 || value > 65535) {
+			error = "Port out of range ('" + token + "').";
+			return false;
+		}
+
+		dedup.insert(static_cast<std::uint16_t>(value));
+	}
+
+	if (allowAll) {
+		request.allowAll = true;
+		request.ports.clear();
+		return true;
+	}
+
+	if (dedup.empty()) {
+		error = "No valid ports provided.";
+		return false;
+	}
+
+	request.allowAll = false;
+	request.ports.assign(dedup.begin(), dedup.end());
+	return true;
+}
+
+static PortPromptResult PromptWhitelistPorts(const std::string& prompt,
+	WhitelistPortsRequest& request) {
+	while (true) {
+		std::cout << prompt;
+		std::string line;
+		std::getline(std::cin, line);
+
+		auto tokens = Tokenize(line);
+		if (tokens.empty()) {
+			std::cout << "[!] Enter 'all' or a list of ports, or type 'cancel'.\n";
+			continue;
+		}
+
+		if (tokens.size() == 1) {
+			std::string lower = ToLowerCopy(tokens[0]);
+			if (lower == "cancel") {
+				return PortPromptResult::Cancel;
+			}
+		}
+
+		std::string error;
+		if (ParseWhitelistPortTokens(tokens, request, error)) {
+			return PortPromptResult::Success;
+		}
+
+		std::cout << "[!] " << error << "\n";
+	}
 }
 
 int main() {
-    PrintBanner();
-    ProcessManager processManager;
-    InstalledAppsManager iam;
-    FirewallManager firewallManager;
-    if (!firewallManager.Initialize()) {
-        std::cout << "[!] Failed to initialize WFP engine. Run as Administrator.\n";
-        return 1;
-    }
-    int choice = -1;
-    while (choice != 0) {
-        PrintMenu();
-        std::cout << "Enter your choice: ";
-        if (!(std::cin >> choice)) { std::cin.clear(); std::cin.ignore(std::numeric_limits<std::streamsize>::max(), '\n'); continue; }
-        std::cin.ignore(std::numeric_limits<std::streamsize>::max(), '\n');
-        switch (choice) {
-            case 1: ListProcesses(processManager); break;
-            case 2: ListInstalledApps(iam, firewallManager); break;
-            case 3: BlockProcess(firewallManager, processManager); break;
-            case 4: UnblockProcess(firewallManager, processManager); break;
-            case 5: ShowRules(firewallManager); break;
-            case 6: DeleteRuleBySerial(firewallManager); break;
-            case 7: DeleteAllRules(firewallManager); break;
-            case 0: std::cout << "\nExiting...\n"; break;
-            default: std::cout << "Invalid choice. Please try again.\n"; break;
-        }
-        if (choice != 0) {
-            std::cout << "\nPress Enter to continue...";
-            std::cin.get();
-        }
-    }
-    return 0;
+	PrintBanner();
+	FirewallManager firewallManager;
+
+	if (!firewallManager.Initialize()) {
+		std::cerr << "[!] Failed to initialize firewall manager.\n";
+		return 1;
+	}
+
+	std::cout << "[+] Firewall manager initialized successfully.\n";
+
+	FirewallMode mode = PromptMode(firewallManager);
+
+	while (true) {
+		PrintMenu(mode);
+		std::string choice;
+		std::getline(std::cin, choice);
+
+		if (choice == "1") {
+			HandleAddIP(firewallManager, mode);
+			continue;
+		}
+
+		if (choice == "2") {
+			HandleRemoveIP(firewallManager, mode);
+			continue;
+		}
+
+		if (choice == "3") {
+			HandleIPsFromFile(firewallManager, mode);
+			continue;
+		}
+
+		if (choice == "4") {
+			if (mode == FirewallMode::Whitelist) {
+				ManageWhitelistedIPs(firewallManager);
+			} else {
+				ManageBlockedIPs(firewallManager);
+			}
+			continue;
+		}
+
+		if (choice == "5") {
+			ShowRules(firewallManager);
+			continue;
+		}
+
+		if (choice == "6") {
+			ClearAllRules(firewallManager, mode);
+			continue;
+		}
+
+		if (choice == "7" || choice == "q" || choice == "Q") {
+			std::cout << "[+] Exiting AppGate.\n";
+			break;
+		}
+
+		std::cout << "[!] Invalid choice. Please try again.\n";
+	}
+
+	return 0;
 }
 
 void PrintBanner() {
-    std::cout << "\n===================================================\n";
-    std::cout << R"(  ___              _____       _       
- / _ \            |  __ \     | |      
-/ /_\ \_ __  _ __ | |  \/ __ _| |_ ___ 
-|  _  | '_ \| '_ \| | __ / _` | __/ _ \
-| | | | |_) | |_) | |_\ \ (_| | ||  __/
-\_| |_/ .__/| .__/ \____/\__,_|\__\___|
-      | |   | |                        
-      |_|   |_|                        )" << "\n";
-    std::cout << "                     AppGate\n";
-    std::cout << "        Application Network Access Controller\n";
-    std::cout << "=====================================================\n";
-    std::cout << "  - Block/Unblock processes by PID or Path\n";
-    std::cout << "  - List network processes and installed apps\n";
-    std::cout << "  - Requires Administrator rights\n";
-    std::cout << "=====================================================\n\n";
+	std::cout << "==============================\n";
+	std::cout << "  AppGate IP Controller (WFP)\n";
+	std::cout << "==============================\n";
 }
 
-void PrintMenu() {
-    std::cout << "\n";
-    std::cout << "+--------------------------------------------+\n";
-    std::cout << "| 1. List processes using network            |\n";
-    std::cout << "| 2. List installed applications             |\n";
-    std::cout << "| 3. Block process (by PID or Path)          |\n";
-    std::cout << "| 4. Unblock process (by PID or Path)        |\n";
-    std::cout << "| 5. Show active rules                       |\n";
-    std::cout << "| 6. Delete rule by serial number            |\n";
-    std::cout << "| 7. Delete all rules created by this program|\n";
-    std::cout << "| 0. Exit                                    |\n";
-    std::cout << "+--------------------------------------------+\n";
+FirewallMode PromptMode(FirewallManager& fm) {
+	while (true) {
+		std::cout << "\nSelect firewall mode:\n";
+		std::cout << "1. Blacklist (block specific IPs)\n";
+		std::cout << "2. Whitelist (block everything except explicitly allowed IPs/ports)\n";
+		std::cout << "Choice: ";
+		std::string choice;
+		std::getline(std::cin, choice);
+
+		if (choice == "1") {
+			if (fm.IsWhitelistMode()) {
+				fm.DisableWhitelistMode();
+			}
+			std::cout << "[+] Blacklist mode selected.\n";
+			return FirewallMode::Blacklist;
+		}
+
+		if (choice == "2") {
+			if (fm.EnableWhitelistMode()) {
+				std::cout << "[+] Whitelist mode selected.\n";
+				return FirewallMode::Whitelist;
+			}
+			std::cout << "[!] Could not enable whitelist mode. Resolve the issue and try again.\n";
+			continue;
+		}
+
+		std::cout << "[!] Invalid choice. Please enter 1 or 2.\n";
+	}
 }
 
-void ListProcesses(ProcessManager& pm) {
-    auto rows = pm.ListNetworkProcessesGrouped();
-    if (rows.empty()) { std::cout << "[!] No network processes found.\n"; return; }
-    std::size_t maxName=4, maxPath=4, maxProto=5, maxL=5, maxR=6;
-    for (const auto& r : rows) {
-        maxName = std::max(maxName, r.name.size());
-        maxPath = std::max(maxPath, r.path.size());
-        maxProto= std::max(maxProto, r.protocol.size());
-        maxL = std::max(maxL, JoinCSV(r.localPorts).size());
-        maxR = std::max(maxR, JoinCSV(r.remotePorts).size());
-    }
-    std::cout << std::left
-        << std::setw(7) << "PID"
-        << std::setw((int)maxName+2) << "Name"
-        << std::setw((int)maxPath+2) << "Path"
-        << std::setw((int)maxProto+2) << "Proto"
-        << std::setw((int)maxL+2) << "LocalPorts"
-        << std::setw((int)maxR+2) << "RemotePorts" << "\n";
-    std::cout << std::string(7+(int)maxName+2+(int)maxPath+2+(int)maxProto+2+(int)maxL+2+(int)maxR+2, '-') << "\n";
-    for (const auto& r : rows) {
-        std::cout << std::left
-            << std::setw(7) << r.pid
-            << std::setw((int)maxName+2) << r.name
-            << std::setw((int)maxPath+2) << r.path
-            << std::setw((int)maxProto+2) << r.protocol
-            << std::setw((int)maxL+2) << JoinCSV(r.localPorts)
-            << std::setw((int)maxR+2) << JoinCSV(r.remotePorts) << "\n";
-    }
+void PrintMenu(FirewallMode mode) {
+	if (mode == FirewallMode::Whitelist) {
+		std::cout << "\nCurrent mode: Whitelist (all ports blocked by default)\n";
+		std::cout << "1. Whitelist IP Address\n";
+		std::cout << "2. Remove Whitelisted IP\n";
+		std::cout << "3. Load Whitelist from white.txt\n";
+		std::cout << "4. Manage Whitelisted IPs\n";
+		std::cout << "5. Show Rules\n";
+		std::cout << "6. Clear Managed Rules\n";
+		std::cout << "7. Exit\n";
+	} else {
+		std::cout << "\nCurrent mode: Blacklist\n";
+		std::cout << "1. Block IP Address\n";
+		std::cout << "2. Unblock IP Address\n";
+		std::cout << "3. Load Block List from file\n";
+		std::cout << "4. Manage Blocked IPs\n";
+		std::cout << "5. Show Rules\n";
+		std::cout << "6. Clear Managed Rules\n";
+		std::cout << "7. Exit\n";
+	}
+	std::cout << "Choice: ";
 }
 
-void ListInstalledApps(InstalledAppsManager& iam, FirewallManager& fm) {
-    auto apps = iam.EnumerateAll();
-    if (apps.empty()) { std::cout << "[!] No installed applications found.\n"; return; }
-    std::size_t maxName = 12, maxPath = 4, maxSrc = 8;
-    for (const auto& a : apps) {
-        maxName = std::max(maxName, a.name.size());
-        maxPath = std::max(maxPath, a.exePath.size());
-        maxSrc  = std::max(maxSrc, a.source.size());
-    }
-    std::cout << std::left
-        << std::setw(6) << "#"
-        << std::setw((int)maxName+2) << "Application"
-        << std::setw((int)maxPath+2) << "Executable Path"
-        << std::setw((int)maxSrc+2)  << "Source"
-        << std::setw(8) << "UWP" << "\n";
-    std::cout << std::string(6+(int)maxName+2+(int)maxPath+2+(int)maxSrc+2+8, '-') << "\n";
-    int idx = 1;
-    for (const auto& a : apps) {
-        std::cout << std::left
-            << std::setw(6) << idx
-            << std::setw((int)maxName+2) << Utils::WideToUtf8(a.name)
-            << std::setw((int)maxPath+2) << Utils::WideToUtf8(a.exePath)
-            << std::setw((int)maxSrc+2)  << Utils::WideToUtf8(a.source)
-            << std::setw(8) << (a.isUWP ? "Yes" : "No") << "\n";
-        ++idx;
-    }
-    std::cout << "\nEnter number to block (or 'u' to unblock by number, Enter to skip): ";
-    std::string input; std::getline(std::cin, input);
-    if (input.empty()) return;
-    bool unblock = false;
-    if (input.size() > 1 && (input[0] == 'u' || input[0] == 'U')) { unblock = true; input = input.substr(1); }
-    try {
-        int sel = std::stoi(input);
-        if (sel < 1 || sel > (int)apps.size()) { std::cout << "[!] Invalid selection.\n"; return; }
-        const auto& app = apps[sel-1];
-        if (!unblock) fm.BlockProcessByPathW(app.exePath); else fm.UnblockProcessByPathW(app.exePath);
-    } catch (...) { std::cout << "[!] Invalid input.\n"; }
+void HandleAddIP(FirewallManager& fm, FirewallMode mode) {
+	const char* prompt = mode == FirewallMode::Whitelist ? "Enter IP address to whitelist: "
+														 : "Enter IP address to block: ";
+	std::cout << prompt;
+	std::string ip;
+	std::getline(std::cin, ip);
+
+	if (ip.empty()) {
+		std::cout << "[!] IP address cannot be empty.\n";
+		return;
+	}
+
+	bool success = false;
+	if (mode == FirewallMode::Whitelist) {
+		WhitelistPortsRequest request;
+		PortPromptResult result = PromptWhitelistPorts(
+			"Enter 'all' to allow the entire IP or list allowed ports (space-separated). Type 'cancel' to abort: ", request);
+		if (result == PortPromptResult::Cancel) {
+			std::cout << "[i] Whitelist request cancelled.\n";
+			return;
+		}
+
+		success = request.allowAll ? fm.WhitelistIP(ip) : fm.WhitelistIP(ip, request.ports);
+	} else {
+		success = fm.BlockIP(ip);
+	}
+
+	if (success) {
+		std::cout << (mode == FirewallMode::Whitelist ? "[+] Whitelisted IP: " : "[+] Blocked IP: ") << ip << "\n";
+	} else {
+		std::cout << (mode == FirewallMode::Whitelist ? "[!] Failed to whitelist IP: " : "[!] Failed to block IP: ")
+			  << ip << "\n";
+	}
 }
 
-void BlockProcess(FirewallManager& fm, ProcessManager& pm) {
-    std::cout << "Enter PID or process path to block: ";
-    std::string input;
-    std::getline(std::cin, input);
-    if (input.empty()) { std::cout << "[!] No input.\n"; return; }
-    try {
-        int pid = std::stoi(input);
-        auto proc = pm.GetProcessByPID(pid);
-        if (proc.pid == 0) { std::cout << "[!] PID not found.\n"; return; }
-        fm.BlockProcessByPID(proc.pid, proc.path);
-    } catch (...) {
-        fm.BlockProcessByPath(input);
-    }
+void HandleRemoveIP(FirewallManager& fm, FirewallMode mode) {
+	const char* prompt = mode == FirewallMode::Whitelist ? "Enter IP address to remove from whitelist: "
+														 : "Enter IP address to unblock: ";
+	std::cout << prompt;
+	std::string ip;
+	std::getline(std::cin, ip);
+
+	if (ip.empty()) {
+		std::cout << "[!] IP address cannot be empty.\n";
+		return;
+	}
+
+	bool success = mode == FirewallMode::Whitelist ? fm.RemoveWhitelistedIP(ip) : fm.UnblockIP(ip);
+	if (success) {
+		std::cout << (mode == FirewallMode::Whitelist ? "[+] Removed whitelisted IP: " : "[+] Unblocked IP: ")
+				  << ip << "\n";
+	} else {
+		std::cout << (mode == FirewallMode::Whitelist ? "[!] Failed to remove whitelisted IP: "
+													  : "[!] Failed to unblock IP: ")
+				  << ip << "\n";
+	}
 }
 
-void UnblockProcess(FirewallManager& fm, ProcessManager& pm) {
-    std::cout << "Enter PID or process path to unblock: ";
-    std::string input;
-    std::getline(std::cin, input);
-    if (input.empty()) { std::cout << "[!] No input.\n"; return; }
-    try {
-        int pid = std::stoi(input);
-        auto proc = pm.GetProcessByPID(pid);
-        if (proc.pid == 0) { std::cout << "[!] PID not found.\n"; return; }
-        fm.UnblockProcessByPath(proc.path);
-    } catch (...) {
-        fm.UnblockProcessByPath(input);
-    }
+void HandleIPsFromFile(FirewallManager& fm, FirewallMode mode) {
+	std::string filePath;
+	if (mode == FirewallMode::Whitelist) {
+		filePath = "white.txt";
+		std::cout << "[i] Loading whitelist entries from " << filePath << "\n";
+	} else {
+		std::cout << "Enter path to block list file (default blockIPs.txt): ";
+		std::getline(std::cin, filePath);
+		if (filePath.empty()) {
+			filePath = "blockIPs.txt";
+		}
+	}
+
+	std::ifstream file(filePath);
+	if (!file.is_open()) {
+		std::cout << "[!] Could not open file: " << filePath << "\n";
+		return;
+	}
+
+	std::string line;
+	int successCount = 0;
+	int failCount = 0;
+
+	while (std::getline(file, line)) {
+		if (line.empty() || line[0] == '#') {
+			continue;
+		}
+
+		std::istringstream iss(line);
+		std::string ip;
+		if (!(iss >> ip)) {
+			continue;
+		}
+
+		std::vector<std::string> tokens;
+		std::string token;
+		while (iss >> token) {
+			tokens.push_back(token);
+		}
+
+		if (mode == FirewallMode::Whitelist) {
+			if (tokens.empty()) {
+				std::cout << "[!] Whitelist entry for " << ip << " must specify 'all' or a port list.\n";
+				++failCount;
+				continue;
+			}
+
+			WhitelistPortsRequest request;
+			std::string error;
+			if (!ParseWhitelistPortTokens(tokens, request, error)) {
+				std::cout << "[!] " << error << " for IP " << ip << ".\n";
+				++failCount;
+				continue;
+			}
+
+			bool success = request.allowAll ? fm.WhitelistIP(ip) : fm.WhitelistIP(ip, request.ports);
+			if (success) {
+				++successCount;
+			} else {
+				++failCount;
+			}
+			continue;
+		}
+
+		if (tokens.empty()) {
+			if (fm.BlockIP(ip)) {
+				++successCount;
+			} else {
+				++failCount;
+			}
+			continue;
+		}
+
+		bool requestAll = false;
+		for (const auto& t : tokens) {
+			std::string lower = t;
+			std::transform(lower.begin(), lower.end(), lower.begin(),
+				[](unsigned char ch) { return static_cast<char>(std::tolower(ch)); });
+			if (lower == "all" || lower == "any" || lower == "*") {
+				requestAll = true;
+				break;
+			}
+		}
+
+		if (requestAll) {
+			if (fm.BlockIP(ip)) {
+				++successCount;
+			} else {
+				++failCount;
+			}
+			continue;
+		}
+
+		bool processedPort = false;
+		for (const auto& portToken : tokens) {
+			int value = 0;
+			try {
+				value = std::stoi(portToken);
+			} catch (...) {
+				std::cout << "[!] Invalid port '" << portToken << "' for IP " << ip << ".\n";
+				++failCount;
+				continue;
+			}
+
+			if (value <= 0 || value > 65535) {
+				std::cout << "[!] Port out of range ('" << portToken << "') for IP " << ip << ".\n";
+				++failCount;
+				continue;
+			}
+
+			processedPort = true;
+			if (fm.BlockIP(ip, static_cast<std::uint16_t>(value))) {
+				++successCount;
+			} else {
+				++failCount;
+			}
+		}
+
+		if (!processedPort) {
+			std::cout << "[!] No valid ports specified for IP " << ip << ".\n";
+		}
+	}
+
+	const char* action = mode == FirewallMode::Whitelist ? "whitelisted" : "block operations performed";
+	std::cout << "[+] " << successCount << " " << action;
+	if (failCount > 0) {
+		std::cout << ", " << failCount << " failed";
+	}
+	std::cout << ".\n";
 }
 
 void ShowRules(FirewallManager& fm) {
-    auto rules = fm.ListRules();
-    if (rules.empty()) {
-        std::cout << "[!] No rules found.\n";
-        return;
-    }
-    std::size_t maxName = 12, maxPath = 4;
-    for (const auto& r : rules) {
-        maxName = std::max(maxName, static_cast<std::size_t>(r.processName.size()));
-        maxPath = std::max(maxPath, static_cast<std::size_t>(r.processPath.size()));
-    }
-    std::cout << std::left
-        << std::setw(5) << "#"
-        << std::setw(static_cast<int>(maxName+2)) << "Process Name"
-        << std::setw(static_cast<int>(maxPath+2)) << "Path"
-        << std::setw(18) << "FilterId" << "\n";
-    std::cout << std::string(static_cast<std::size_t>(5+maxName+2+maxPath+2+18), '-') << "\n";
-    int idx = 1;
-    for (const auto& r : rules) {
-        std::cout << std::left
-            << std::setw(5) << idx
-            << std::setw(static_cast<int>(maxName+2)) << r.processName
-            << std::setw(static_cast<int>(maxPath+2)) << r.processPath
-            << std::setw(18) << std::to_string(r.filterId) << "\n";
-        ++idx;
-    }
+	const auto rules = fm.ListRules();
+	if (rules.empty()) {
+		std::cout << "[+] No managed IP rules.\n";
+		return;
+	}
+
+	std::cout << "\nManaged IP Rules:\n";
+	std::cout << std::left << std::setw(6) << "#" << std::setw(20) << "IP Address" << std::setw(10) << "Type" << "Details\n";
+	std::cout << std::string(50, '-') << "\n";
+
+	for (const auto& rule : rules) {
+		const char* typeLabel = rule.isWhitelist ? "Allow" : "Block";
+		std::string details;
+		if (rule.isWhitelist) {
+			details = DescribeAllowedPorts(rule);
+		} else {
+			details = rule.allPorts ? "All ports" : DescribeBlockedPorts(rule);
+		}
+
+		std::cout << std::left << std::setw(6) << rule.serial
+			  << std::setw(20) << rule.ipAddress
+			  << std::setw(10) << typeLabel
+			  << details << "\n";
+	}
 }
 
-void DeleteRuleBySerial(FirewallManager& fm) {
-    auto rules = fm.ListRules();
-    if (rules.empty()) {
-        std::cout << "[!] No rules to delete.\n";
-        return;
-    }
-    std::cout << "Enter rule serial number to delete: ";
-    std::string input;
-    std::getline(std::cin, input);
-    int serial = 0;
-    try { serial = std::stoi(input); } catch (...) { std::cout << "[!] Invalid input.\n"; return; }
-    if (!fm.DeleteRuleBySerial(serial)) {
-        std::cout << "[!] Rule not found.\n";
-    }
+void ClearAllRules(FirewallManager& fm, FirewallMode mode) {
+	fm.ClearRules();
+	std::cout << "[+] Cleared managed rules.";
+	if (mode == FirewallMode::Whitelist) {
+		std::cout << " Default block filters remain active.";
+	}
+	std::cout << "\n";
 }
 
-void DeleteAllRules(FirewallManager& fm) { fm.DeleteAllRules(); }
+std::string DescribeBlockedPorts(const RuleEntry& rule) {
+	if (rule.allPorts) {
+		return "All ports";
+	}
+	if (rule.portRules.empty()) {
+		return "None";
+	}
+
+	std::ostringstream oss;
+	bool first = true;
+	for (const auto& portRule : rule.portRules) {
+		if (!first) {
+			oss << ' ';
+		}
+		oss << portRule.port;
+		first = false;
+	}
+	return oss.str();
+}
+
+std::string DescribeAllowedPorts(const RuleEntry& rule) {
+	if (rule.allPorts) {
+		return "All ports";
+	}
+	if (rule.portRules.empty()) {
+		return "None";
+	}
+
+	std::ostringstream oss;
+	bool first = true;
+	for (const auto& portRule : rule.portRules) {
+		if (!first) {
+			oss << ' ';
+		}
+		oss << portRule.port;
+		first = false;
+	}
+	return oss.str();
+}
+
+void ManageBlockedIPs(FirewallManager& fm) {
+	while (true) {
+		auto allRules = fm.ListRules();
+		std::vector<RuleEntry> blocked;
+		blocked.reserve(allRules.size());
+		for (const auto& rule : allRules) {
+			if (!rule.isWhitelist) {
+				blocked.push_back(rule);
+			}
+		}
+
+		if (blocked.empty()) {
+			std::cout << "[+] No blocked IPs to manage.\n";
+			return;
+		}
+
+		std::cout << "\nBlocked IPs:\n";
+		std::cout << std::left << std::setw(6) << "#" << std::setw(20) << "IP Address" << "Blocked Ports\n";
+		std::cout << std::string(40, '-') << "\n";
+		for (const auto& rule : blocked) {
+			std::cout << std::left << std::setw(6) << rule.serial
+			          << std::setw(20) << rule.ipAddress
+			          << DescribeBlockedPorts(rule) << "\n";
+		}
+
+		std::cout << "Enter serial number or IP to edit (blank to return): ";
+		std::string selection;
+		std::getline(std::cin, selection);
+		if (selection.empty()) {
+			return;
+		}
+
+		std::string targetIp;
+		bool found = false;
+
+		try {
+			int serial = std::stoi(selection);
+			auto serialIt = std::find_if(blocked.begin(), blocked.end(),
+				[&](const RuleEntry& rule) { return rule.serial == serial; });
+			if (serialIt != blocked.end()) {
+				targetIp = serialIt->ipAddress;
+				found = true;
+			}
+		} catch (...) {
+			// fall through to string match
+		}
+
+		if (!found) {
+			auto ipIt = std::find_if(blocked.begin(), blocked.end(),
+				[&](const RuleEntry& rule) { return rule.ipAddress == selection; });
+			if (ipIt != blocked.end()) {
+				targetIp = ipIt->ipAddress;
+				found = true;
+			}
+		}
+
+		if (!found) {
+			std::cout << "[!] Could not find a blocked IP matching '" << selection << "'.\n";
+			continue;
+		}
+
+		EditBlockedIP(fm, targetIp);
+	}
+}
+
+void EditBlockedIP(FirewallManager& fm, const std::string& ipAddress) {
+	while (true) {
+		auto rules = fm.ListRules();
+		auto it = std::find_if(rules.begin(), rules.end(),
+			[&](const RuleEntry& rule) { return !rule.isWhitelist && rule.ipAddress == ipAddress; });
+		if (it == rules.end()) {
+			std::cout << "[!] IP " << ipAddress << " is no longer blocked.\n";
+			return;
+		}
+
+		const RuleEntry& rule = *it;
+		std::cout << "\nManaging IP: " << ipAddress << "\n";
+		std::cout << "Current block configuration: " << DescribeBlockedPorts(rule) << "\n";
+		std::cout << "1. Block all ports\n";
+		std::cout << "2. Add blocked port(s)\n";
+		std::cout << "3. Remove blocked port\n";
+		std::cout << "4. Done\n";
+		std::cout << "Choice: ";
+		std::string choice;
+		std::getline(std::cin, choice);
+
+		if (choice.empty() || choice == "4") {
+			return;
+		}
+
+		if (choice == "1") {
+			fm.BlockIP(ipAddress);
+			continue;
+		}
+
+		if (choice == "2") {
+			std::cout << "Enter port numbers (space-separated, type 'all' for all ports): ";
+			std::string portsLine;
+			std::getline(std::cin, portsLine);
+			if (portsLine.empty()) {
+				continue;
+			}
+
+			std::istringstream iss(portsLine);
+			std::string token;
+			bool requestedAll = false;
+			std::vector<std::uint16_t> ports;
+
+			while (iss >> token) {
+				std::string lower = token;
+				std::transform(lower.begin(), lower.end(), lower.begin(),
+					[](unsigned char ch) { return static_cast<char>(std::tolower(ch)); });
+				if (lower == "all" || lower == "any" || lower == "*") {
+					requestedAll = true;
+					break;
+				}
+
+				int value = 0;
+				try {
+					value = std::stoi(token);
+				} catch (...) {
+					std::cout << "[!] Invalid port '" << token << "'.\n";
+					continue;
+				}
+
+				if (value <= 0 || value > 65535) {
+					std::cout << "[!] Port out of range ('" << token << "').\n";
+					continue;
+				}
+
+				ports.push_back(static_cast<std::uint16_t>(value));
+			}
+
+			if (requestedAll) {
+				fm.BlockIP(ipAddress);
+				continue;
+			}
+
+			if (ports.empty()) {
+				std::cout << "[!] No valid ports provided.\n";
+				continue;
+			}
+
+			for (std::uint16_t portValue : ports) {
+				fm.BlockIP(ipAddress, portValue);
+			}
+			continue;
+		}
+
+		if (choice == "3") {
+			if (rule.allPorts) {
+				std::cout << "[!] IP currently blocks all ports. Switch to specific ports before removing any.\n";
+				continue;
+			}
+
+			if (rule.portRules.empty()) {
+				std::cout << "[!] No specific ports to remove.\n";
+				continue;
+			}
+
+			std::cout << "Blocked ports: " << DescribeBlockedPorts(rule) << "\n";
+			std::cout << "Enter port to remove: ";
+			std::string portInput;
+			std::getline(std::cin, portInput);
+			if (portInput.empty()) {
+				continue;
+			}
+
+			int value = 0;
+			try {
+				value = std::stoi(portInput);
+			} catch (...) {
+				std::cout << "[!] Invalid port entry.\n";
+				continue;
+			}
+
+			if (value <= 0 || value > 65535) {
+				std::cout << "[!] Port out of range.\n";
+				continue;
+			}
+
+			fm.RemovePortBlock(ipAddress, static_cast<std::uint16_t>(value));
+			continue;
+		}
+
+		std::cout << "[!] Invalid choice.\n";
+	}
+}
+
+void ManageWhitelistedIPs(FirewallManager& fm) {
+	while (true) {
+		auto allRules = fm.ListRules();
+		std::vector<RuleEntry> allowed;
+		allowed.reserve(allRules.size());
+		for (const auto& rule : allRules) {
+			if (rule.isWhitelist) {
+				allowed.push_back(rule);
+			}
+		}
+
+		if (allowed.empty()) {
+			std::cout << "[+] No whitelisted IPs to manage.\n";
+			return;
+		}
+
+		std::cout << "\nWhitelisted IPs:\n";
+		std::cout << std::left << std::setw(6) << "#" << std::setw(20) << "IP Address" << "Allowed Ports\n";
+		std::cout << std::string(40, '-') << "\n";
+		for (const auto& rule : allowed) {
+			std::cout << std::left << std::setw(6) << rule.serial
+			          << std::setw(20) << rule.ipAddress
+			          << DescribeAllowedPorts(rule) << "\n";
+		}
+
+		std::cout << "Enter serial number or IP to edit (blank to return): ";
+		std::string selection;
+		std::getline(std::cin, selection);
+		if (selection.empty()) {
+			return;
+		}
+
+		std::string targetIp;
+		bool found = false;
+
+		try {
+			int serial = std::stoi(selection);
+			auto serialIt = std::find_if(allowed.begin(), allowed.end(),
+				[&](const RuleEntry& rule) { return rule.serial == serial; });
+			if (serialIt != allowed.end()) {
+				targetIp = serialIt->ipAddress;
+				found = true;
+			}
+		} catch (...) {
+			// fall through to string match
+		}
+
+		if (!found) {
+			auto ipIt = std::find_if(allowed.begin(), allowed.end(),
+				[&](const RuleEntry& rule) { return rule.ipAddress == selection; });
+			if (ipIt != allowed.end()) {
+				targetIp = ipIt->ipAddress;
+				found = true;
+			}
+		}
+
+		if (!found) {
+			std::cout << "[!] Could not find a whitelisted IP matching '" << selection << "'.\n";
+			continue;
+		}
+
+		EditWhitelistedIP(fm, targetIp);
+	}
+}
+
+void EditWhitelistedIP(FirewallManager& fm, const std::string& ipAddress) {
+	while (true) {
+		auto rules = fm.ListRules();
+		auto it = std::find_if(rules.begin(), rules.end(),
+			[&](const RuleEntry& rule) { return rule.isWhitelist && rule.ipAddress == ipAddress; });
+		if (it == rules.end()) {
+			std::cout << "[!] IP " << ipAddress << " is no longer whitelisted.\n";
+			return;
+		}
+
+		const RuleEntry& rule = *it;
+		std::cout << "\nManaging IP: " << ipAddress << "\n";
+		std::cout << "Current allow configuration: " << DescribeAllowedPorts(rule) << "\n";
+		std::cout << "1. Allow all ports\n";
+		std::cout << "2. Add allowed port(s)\n";
+		std::cout << "3. Remove allowed port\n";
+		std::cout << "4. Remove IP from whitelist\n";
+		std::cout << "5. Done\n";
+		std::cout << "Choice: ";
+		std::string choice;
+		std::getline(std::cin, choice);
+
+		if (choice.empty() || choice == "5") {
+			return;
+		}
+
+		if (choice == "1") {
+			if (!fm.WhitelistIP(ipAddress)) {
+				std::cout << "[!] Failed to allow all ports for IP " << ipAddress << ".\n";
+			}
+			continue;
+		}
+
+		if (choice == "2") {
+			WhitelistPortsRequest request;
+			PortPromptResult result = PromptWhitelistPorts(
+				"Enter 'all' to allow the entire IP or list allowed ports (space-separated). Type 'cancel' to abort: ", request);
+			if (result == PortPromptResult::Cancel) {
+				continue;
+			}
+
+			if (request.allowAll) {
+				if (!fm.WhitelistIP(ipAddress)) {
+					std::cout << "[!] Failed to allow all ports for IP " << ipAddress << ".\n";
+				}
+				continue;
+			}
+
+			if (!fm.AllowPortsForIP(ipAddress, request.ports)) {
+				std::cout << "[!] Failed to add allowed ports.\n";
+			}
+			continue;
+		}
+
+		if (choice == "3") {
+			if (rule.allPorts) {
+				std::cout << "[!] IP currently allows all ports. Switch to specific ports before removing any.\n";
+				continue;
+			}
+
+			if (rule.portRules.empty()) {
+				std::cout << "[!] No specific ports to remove.\n";
+				continue;
+			}
+
+			std::cout << "Allowed ports: " << DescribeAllowedPorts(rule) << "\n";
+			std::cout << "Enter port to remove: ";
+			std::string portInput;
+			std::getline(std::cin, portInput);
+			if (portInput.empty()) {
+				continue;
+			}
+
+			int value = 0;
+			try {
+				value = std::stoi(portInput);
+			} catch (...) {
+				std::cout << "[!] Invalid port entry.\n";
+				continue;
+			}
+
+			if (value <= 0 || value > 65535) {
+				std::cout << "[!] Port out of range.\n";
+				continue;
+			}
+
+			if (!fm.RemoveWhitelistPort(ipAddress, static_cast<std::uint16_t>(value))) {
+				std::cout << "[!] Failed to remove allowed port.\n";
+			}
+			continue;
+		}
+
+		if (choice == "4") {
+			if (fm.RemoveWhitelistedIP(ipAddress)) {
+				std::cout << "[+] Removed IP " << ipAddress << " from whitelist.\n";
+				return;
+			}
+			std::cout << "[!] Failed to remove IP from whitelist.\n";
+			continue;
+		}
+
+		std::cout << "[!] Invalid choice.\n";
+	}
+}

@@ -1,0 +1,19 @@
+# blockIPs.txt
+# List of IP addresses to block (one per line)
+# Lines starting with # are comments and will be ignored
+# Both IPv4 and IPv6 addresses are supported
+
+# Example IPv4 addresses (uncomment to test)
+# 8.8.8.8
+# 1.1.1.1
+
+# Example IPv6 addresses (uncomment to test)
+# 2606:4700:4700::1111
+
+# Google DNS (for testing - uncomment to block)
+# 8.8.8.8
+
+# Cloudflare DNS (for testing - uncomment to block)
+# 1.1.1.1
+
+# Add your IP addresses below (one per line, remove # to activate)

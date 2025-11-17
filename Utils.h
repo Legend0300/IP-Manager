@@ -5,6 +5,9 @@
 #ifndef NOMINMAX
 #define NOMINMAX
 #endif
+// Include winsock2 before windows.h
+#include <winsock2.h>
+#include <ws2tcpip.h>
 #include <windows.h>
 #include <guiddef.h>
 
@@ -17,4 +20,6 @@ namespace Utils {
     std::string GetLastErrorAsString();
     // UTF conversions
     std::string WideToUtf8(const std::wstring& w);
+    // IP connectivity test
+    bool TestIPConnectivity(const std::string& ipAddress, int timeoutMs = 2000);
 }
