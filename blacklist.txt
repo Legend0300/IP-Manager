@@ -1,0 +1,14 @@
+# blacklist.txt
+# Managed by AppGate – changes from the CLI overwrite this file automatically.
+# List of IP addresses to block (one per line)
+# Lines starting with # are comments and ignored.
+# Each entry can be one of:
+#   <ip> all            # block every port for the IP
+#   <ip> 80 443 8443    # block just the listed TCP/UDP ports
+# Keywords all/any/* are equivalent when listing ports.
+
+# Example IPv4 and IPv6 entries (uncomment to use):
+# 8.8.8.8 all
+# 1.1.1.1 80 443
+# 2606:4700:4700::1111
+

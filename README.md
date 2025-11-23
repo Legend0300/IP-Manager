@@ -6,7 +6,7 @@ AppGate is a Windows command-line firewall assistant built on the Windows Filter
 - **Two enforcement modes** – traditional blacklist blocking or a whitelist “default deny” mode where all traffic is blocked unless explicitly opened.
 - **IPv4 + IPv6** – every filter is installed for both protocol families and for inbound/outbound transport layers.
 - **Per-port control** – block or allow the whole IP, or specify exact TCP/UDP ports (e.g., `443 8443`).
-- **File-driven automation** – load `blockIPs.txt` or `white.txt` to bulk apply rules, including per-port entries.
+- **File-driven automation** – AppGate loads and rewrites `blacklist.txt` / `whitelist.txt` in the working directory so every CLI change is mirrored on disk (and vice versa for manual edits).
 - **Interactive management** – inspect managed rules, edit an existing IP, switch between “all ports” and “selected ports”, or remove individual port allowances.
 - **Safe by default** – whitelist mode automatically installs blanket block filters before any IP is opened, ensuring no traffic slips through.
 
@@ -92,16 +92,18 @@ Main menu options (labels differ slightly between modes):
 
 1. **Whitelist/Block IP Address** – prompt for an IP, then choose `all` or specific ports to allow/block.
 2. **Remove Whitelisted/Unblock IP** – delete an existing rule entirely.
-3. **Load Whitelist / Load Block List** – import from a file (`white.txt` for whitelist mode or a custom path/default `blockIPs.txt` for blacklist mode).
+3. **Load Whitelist / Load Block List** – re-import from the current directory’s `whitelist.txt` / `blacklist.txt`. AppGate prints the exact path, clears the in-memory rules for the active mode, and reloads the file (which is also updated automatically after every CLI edit).
 4. **Manage Whitelisted/Blocked IPs** – open an editor for any managed IP to toggle “all ports”, add or remove specific ports, or delete the entry.
 5. **Show Rules** – tabular view of every AppGate-managed rule with serial, IP, type, and details.
 6. **Clear Managed Rules** – remove every rule AppGate created in the current session (whitelist mode keeps the background default-deny filters so the network stays blocked).
 7. **Exit** – closes AppGate, automatically removing all dynamic filters.
 
 ### File formats
-- **Blacklist** (`blockIPs.txt` by default): each line `IP [port ...]`. Use keywords `all`, `any`, or `*` to block every port.
-- **Whitelist** (`white.txt`): each line must specify either `IP all` or `IP port1 port2 ...`. Invalid ports are rejected with a warning, and the line is skipped.
+- **Blacklist** (`blacklist.txt`): each line `IP [port ...]`. Use keywords `all`, `any`, or `*` to block every port.
+- **Whitelist** (`whitelist.txt`): each line must specify either `IP all` or `IP port1 port2 ...`. Invalid ports are rejected with a warning, and the line is skipped.
 - Lines starting with `#` are treated as comments.
+
+> AppGate automatically loads the file that matches the selected mode at startup, rewrites it after every menu-driven change, and lets you reload it on demand via option 3. Keep the files next to the executable (or run AppGate from the directory that contains them) if you want the rules to persist between runs.
 
 ### Managing existing IPs
 Use option 4 to pick an IP (by serial number or literal address). The editor lets you:
@@ -126,7 +128,7 @@ Use option 4 to pick an IP (by serial number or literal address). The editor let
 - `FirewallManager.h/.cpp` – WFP session management plus block/whitelist filter orchestration.
 - `Models.h` – rule/port metadata stored in memory for editing.
 - `Utils.*` – helper utilities (string conversions, GUID helpers, etc.).
-- `blockIPs.txt`, `white.txt` – sample lists for batch operations.
+- `blacklist.txt`, `whitelist.txt` – managed rule stores that AppGate loads at startup and rewrites after each CLI change.
 - `usage.md` – legacy/extended usage notes.
 
 ---

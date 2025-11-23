@@ -1,0 +1,13 @@
+# whitelist.txt
+# Managed by AppGate – changes made through the CLI overwrite this file automatically.
+# List of IP addresses to allow when AppGate runs in whitelist mode.
+# Format per line:
+#   <ip> all            # allow all ports for the IP
+#   <ip> 22 80 443      # allow only the listed TCP/UDP ports
+# Lines starting with # are ignored.
+
+# Example entries (uncomment to use):
+# 203.0.113.5 all
+# 198.51.100.42 443 8443
+# 2606:4700:4700::1111 80 443
+

@@ -6,6 +6,7 @@
 #include <algorithm>
 #include <cctype>
 #include <cstddef>
+#include <filesystem>
 #include <fstream>
 #include <iomanip>
 #include <iostream>
@@ -18,6 +19,16 @@
 #include "Models.h"
 
 enum class FirewallMode { Blacklist, Whitelist };
+
+static constexpr const char* kWhitelistFile = "whitelist.txt";
+static constexpr const char* kBlacklistFile = "blacklist.txt";
+
+struct FileLoadStats {
+	bool opened = false;
+	int applied = 0;
+	int failed = 0;
+	std::vector<std::string> appliedEntries;
+};
 
 void PrintBanner();
 FirewallMode PromptMode(FirewallManager& fm);
@@ -33,6 +44,16 @@ std::string DescribeBlockedPorts(const RuleEntry& rule);
 void ManageWhitelistedIPs(FirewallManager& fm);
 void EditWhitelistedIP(FirewallManager& fm, const std::string& ipAddress);
 std::string DescribeAllowedPorts(const RuleEntry& rule);
+std::filesystem::path ResolveListPath(FirewallMode mode);
+const char* ModeLabel(FirewallMode mode);
+const char* FileLabel(FirewallMode mode);
+void RemoveRulesForMode(FirewallManager& fm, FirewallMode mode);
+bool PersistRulesToDisk(const FirewallManager& fm, FirewallMode mode);
+void PrintListLocation(FirewallMode mode, const std::filesystem::path& path);
+void PrintAppliedEntriesPreview(const FileLoadStats& stats, FirewallMode mode, const std::filesystem::path& path);
+std::vector<std::uint16_t> CollectPorts(const RuleEntry& rule);
+FileLoadStats LoadRulesFromFile(FirewallManager& fm, FirewallMode mode, const std::filesystem::path& filePath, bool quietErrors);
+void LoadPersistedRules(FirewallManager& fm, FirewallMode mode);
 
 struct WhitelistPortsRequest {
 	bool allowAll = false;
@@ -136,6 +157,122 @@ static PortPromptResult PromptWhitelistPorts(const std::string& prompt,
 	}
 }
 
+const char* ModeLabel(FirewallMode mode) {
+	return mode == FirewallMode::Whitelist ? "whitelist" : "blacklist";
+}
+
+const char* FileLabel(FirewallMode mode) {
+	return mode == FirewallMode::Whitelist ? kWhitelistFile : kBlacklistFile;
+}
+
+std::filesystem::path ResolveListPath(FirewallMode mode) {
+	std::filesystem::path path = std::filesystem::current_path();
+	path /= FileLabel(mode);
+	return path;
+}
+
+void PrintListLocation(FirewallMode mode, const std::filesystem::path& path) {
+	std::cout << "[i] " << ModeLabel(mode) << " file: " << path << "\n";
+}
+
+std::vector<std::uint16_t> CollectPorts(const RuleEntry& rule) {
+	std::vector<std::uint16_t> ports;
+	ports.reserve(rule.portRules.size());
+	for (const auto& portRule : rule.portRules) {
+		ports.push_back(portRule.port);
+	}
+	std::sort(ports.begin(), ports.end());
+	ports.erase(std::unique(ports.begin(), ports.end()), ports.end());
+	return ports;
+}
+
+void RemoveRulesForMode(FirewallManager& fm, FirewallMode mode) {
+	auto rules = fm.ListRules();
+	for (const auto& rule : rules) {
+		const bool isWhitelistRule = rule.isWhitelist;
+		if (mode == FirewallMode::Whitelist && isWhitelistRule) {
+			fm.RemoveWhitelistedIP(rule.ipAddress);
+			continue;
+		}
+		if (mode == FirewallMode::Blacklist && !isWhitelistRule) {
+			fm.UnblockIP(rule.ipAddress);
+		}
+	}
+}
+
+bool PersistRulesToDisk(const FirewallManager& fm, FirewallMode mode) {
+	const auto path = ResolveListPath(mode);
+	const auto parent = path.parent_path();
+	std::error_code ec;
+	if (!parent.empty() && !std::filesystem::exists(parent)) {
+		std::filesystem::create_directories(parent, ec);
+		if (ec) {
+			std::cerr << "[!] Failed to create directory for " << ModeLabel(mode) << " file: " << parent << "\n";
+			return false;
+		}
+	}
+
+	std::ofstream file(path, std::ios::trunc);
+	if (!file.is_open()) {
+		std::cerr << "[!] Could not open " << ModeLabel(mode) << " file for writing: " << path << "\n";
+		return false;
+	}
+
+	auto rules = fm.ListRules();
+	bool wroteEntry = false;
+	for (const auto& rule : rules) {
+		const bool matchesMode = (mode == FirewallMode::Whitelist && rule.isWhitelist) ||
+			                    (mode == FirewallMode::Blacklist && !rule.isWhitelist);
+		if (!matchesMode) {
+			continue;
+		}
+
+		file << rule.ipAddress;
+		if (rule.allPorts || rule.portRules.empty()) {
+			file << " all";
+		} else {
+			auto ports = CollectPorts(rule);
+			for (std::uint16_t portValue : ports) {
+				file << ' ' << portValue;
+			}
+		}
+		file << '\n';
+		wroteEntry = true;
+	}
+
+	if (!wroteEntry) {
+		file << "# No entries managed in this mode.\n";
+	}
+
+	file.flush();
+	if (!file.good()) {
+		std::cerr << "[!] Failed to write " << ModeLabel(mode) << " file at " << path << "\n";
+		return false;
+	}
+
+	std::cout << "[i] Saved " << ModeLabel(mode) << " file to " << path << "\n";
+	return true;
+}
+
+void PrintAppliedEntriesPreview(const FileLoadStats& stats,
+	FirewallMode mode,
+	const std::filesystem::path& path) {
+	if (!stats.opened) {
+		std::cout << "[!] Could not read " << ModeLabel(mode) << " file at " << path << "\n";
+		return;
+	}
+
+	if (stats.appliedEntries.empty()) {
+		std::cout << "[i] No " << ModeLabel(mode) << " entries defined in " << path << "\n";
+		return;
+	}
+
+	std::cout << "[i] Entries from " << path << ":\n";
+	for (const auto& entry : stats.appliedEntries) {
+		std::cout << "    - " << entry << "\n";
+	}
+}
+
 int main() {
 	PrintBanner();
 	FirewallManager firewallManager;
@@ -148,6 +285,8 @@ int main() {
 	std::cout << "[+] Firewall manager initialized successfully.\n";
 
 	FirewallMode mode = PromptMode(firewallManager);
+	LoadPersistedRules(firewallManager, mode);
+	LoadPersistedRules(firewallManager, mode);
 
 	while (true) {
 		PrintMenu(mode);
@@ -240,7 +379,7 @@ void PrintMenu(FirewallMode mode) {
 		std::cout << "\nCurrent mode: Whitelist (all ports blocked by default)\n";
 		std::cout << "1. Whitelist IP Address\n";
 		std::cout << "2. Remove Whitelisted IP\n";
-		std::cout << "3. Load Whitelist from white.txt\n";
+		std::cout << "3. Load Whitelist from whitelist.txt\n";
 		std::cout << "4. Manage Whitelisted IPs\n";
 		std::cout << "5. Show Rules\n";
 		std::cout << "6. Clear Managed Rules\n";
@@ -249,7 +388,7 @@ void PrintMenu(FirewallMode mode) {
 		std::cout << "\nCurrent mode: Blacklist\n";
 		std::cout << "1. Block IP Address\n";
 		std::cout << "2. Unblock IP Address\n";
-		std::cout << "3. Load Block List from file\n";
+		std::cout << "3. Load Block List from blacklist.txt\n";
 		std::cout << "4. Manage Blocked IPs\n";
 		std::cout << "5. Show Rules\n";
 		std::cout << "6. Clear Managed Rules\n";
@@ -287,6 +426,7 @@ void HandleAddIP(FirewallManager& fm, FirewallMode mode) {
 
 	if (success) {
 		std::cout << (mode == FirewallMode::Whitelist ? "[+] Whitelisted IP: " : "[+] Blocked IP: ") << ip << "\n";
+		PersistRulesToDisk(fm, mode);
 	} else {
 		std::cout << (mode == FirewallMode::Whitelist ? "[!] Failed to whitelist IP: " : "[!] Failed to block IP: ")
 			  << ip << "\n";
@@ -309,6 +449,7 @@ void HandleRemoveIP(FirewallManager& fm, FirewallMode mode) {
 	if (success) {
 		std::cout << (mode == FirewallMode::Whitelist ? "[+] Removed whitelisted IP: " : "[+] Unblocked IP: ")
 				  << ip << "\n";
+		PersistRulesToDisk(fm, mode);
 	} else {
 		std::cout << (mode == FirewallMode::Whitelist ? "[!] Failed to remove whitelisted IP: "
 													  : "[!] Failed to unblock IP: ")
@@ -317,28 +458,39 @@ void HandleRemoveIP(FirewallManager& fm, FirewallMode mode) {
 }
 
 void HandleIPsFromFile(FirewallManager& fm, FirewallMode mode) {
-	std::string filePath;
-	if (mode == FirewallMode::Whitelist) {
-		filePath = "white.txt";
-		std::cout << "[i] Loading whitelist entries from " << filePath << "\n";
-	} else {
-		std::cout << "Enter path to block list file (default blockIPs.txt): ";
-		std::getline(std::cin, filePath);
-		if (filePath.empty()) {
-			filePath = "blockIPs.txt";
-		}
-	}
-
-	std::ifstream file(filePath);
-	if (!file.is_open()) {
-		std::cout << "[!] Could not open file: " << filePath << "\n";
+	const auto path = ResolveListPath(mode);
+	PrintListLocation(mode, path);
+	std::ifstream probe(path);
+	if (!probe.is_open()) {
+		std::cout << "[!] Could not open " << ModeLabel(mode) << " file: " << path << "\n";
 		return;
 	}
+	probe.close();
 
+	RemoveRulesForMode(fm, mode);
+	FileLoadStats stats = LoadRulesFromFile(fm, mode, path, /*quietErrors=*/false);
+	PrintAppliedEntriesPreview(stats, mode, path);
+
+	const char* action = mode == FirewallMode::Whitelist ? "whitelisted" : "block operations performed";
+	std::cout << "[+] " << stats.applied << " " << action;
+	if (stats.failed > 0) {
+		std::cout << ", " << stats.failed << " failed";
+	}
+	std::cout << ".\n";
+}
+
+FileLoadStats LoadRulesFromFile(FirewallManager& fm,
+	FirewallMode mode,
+	const std::filesystem::path& filePath,
+	bool quietErrors) {
+	FileLoadStats stats;
+	std::ifstream file(filePath);
+	if (!file.is_open()) {
+		return stats;
+	}
+
+	stats.opened = true;
 	std::string line;
-	int successCount = 0;
-	int failCount = 0;
-
 	while (std::getline(file, line)) {
 		if (line.empty() || line[0] == '#') {
 			continue;
@@ -358,33 +510,49 @@ void HandleIPsFromFile(FirewallManager& fm, FirewallMode mode) {
 
 		if (mode == FirewallMode::Whitelist) {
 			if (tokens.empty()) {
-				std::cout << "[!] Whitelist entry for " << ip << " must specify 'all' or a port list.\n";
-				++failCount;
+				if (!quietErrors) {
+					std::cout << "[!] Whitelist entry for " << ip << " must specify 'all' or a port list.\n";
+				}
+				++stats.failed;
 				continue;
 			}
 
 			WhitelistPortsRequest request;
 			std::string error;
 			if (!ParseWhitelistPortTokens(tokens, request, error)) {
-				std::cout << "[!] " << error << " for IP " << ip << ".\n";
-				++failCount;
+				if (!quietErrors) {
+					std::cout << "[!] " << error << " for IP " << ip << ".\n";
+				}
+				++stats.failed;
 				continue;
 			}
 
 			bool success = request.allowAll ? fm.WhitelistIP(ip) : fm.WhitelistIP(ip, request.ports);
 			if (success) {
-				++successCount;
+				++stats.applied;
+				std::ostringstream desc;
+				desc << ip << ' ';
+				if (request.allowAll) {
+					desc << "(all ports)";
+				} else {
+					desc << "ports:";
+					for (std::uint16_t portValue : request.ports) {
+						desc << ' ' << portValue;
+					}
+				}
+				stats.appliedEntries.push_back(desc.str());
 			} else {
-				++failCount;
+				++stats.failed;
 			}
 			continue;
 		}
 
 		if (tokens.empty()) {
 			if (fm.BlockIP(ip)) {
-				++successCount;
+				++stats.applied;
+				stats.appliedEntries.push_back(ip + " (all ports)");
 			} else {
-				++failCount;
+				++stats.failed;
 			}
 			continue;
 		}
@@ -402,49 +570,99 @@ void HandleIPsFromFile(FirewallManager& fm, FirewallMode mode) {
 
 		if (requestAll) {
 			if (fm.BlockIP(ip)) {
-				++successCount;
+				++stats.applied;
+				stats.appliedEntries.push_back(ip + " (all ports)");
 			} else {
-				++failCount;
+				++stats.failed;
 			}
 			continue;
 		}
 
-		bool processedPort = false;
+		bool parsedPort = false;
+		std::vector<std::uint16_t> successfulPorts;
 		for (const auto& portToken : tokens) {
 			int value = 0;
 			try {
 				value = std::stoi(portToken);
 			} catch (...) {
-				std::cout << "[!] Invalid port '" << portToken << "' for IP " << ip << ".\n";
-				++failCount;
+				if (!quietErrors) {
+					std::cout << "[!] Invalid port '" << portToken << "' for IP " << ip << ".\n";
+				}
+				++stats.failed;
 				continue;
 			}
 
 			if (value <= 0 || value > 65535) {
-				std::cout << "[!] Port out of range ('" << portToken << "') for IP " << ip << ".\n";
-				++failCount;
+				if (!quietErrors) {
+					std::cout << "[!] Port out of range ('" << portToken << "') for IP " << ip << ".\n";
+				}
+				++stats.failed;
 				continue;
 			}
 
-			processedPort = true;
-			if (fm.BlockIP(ip, static_cast<std::uint16_t>(value))) {
-				++successCount;
+			parsedPort = true;
+			std::uint16_t portValue = static_cast<std::uint16_t>(value);
+			if (fm.BlockIP(ip, portValue)) {
+				++stats.applied;
+				successfulPorts.push_back(portValue);
 			} else {
-				++failCount;
+				++stats.failed;
 			}
 		}
 
-		if (!processedPort) {
-			std::cout << "[!] No valid ports specified for IP " << ip << ".\n";
+		if (!parsedPort) {
+			if (!quietErrors) {
+				std::cout << "[!] No valid ports specified for IP " << ip << ".\n";
+			}
+			continue;
+		}
+
+		if (!successfulPorts.empty()) {
+			std::sort(successfulPorts.begin(), successfulPorts.end());
+			successfulPorts.erase(std::unique(successfulPorts.begin(), successfulPorts.end()), successfulPorts.end());
+			std::ostringstream desc;
+			desc << ip << " ports:";
+			for (std::uint16_t portValue : successfulPorts) {
+				desc << ' ' << portValue;
+			}
+			stats.appliedEntries.push_back(desc.str());
 		}
 	}
 
-	const char* action = mode == FirewallMode::Whitelist ? "whitelisted" : "block operations performed";
-	std::cout << "[+] " << successCount << " " << action;
-	if (failCount > 0) {
-		std::cout << ", " << failCount << " failed";
+	return stats;
+}
+
+void LoadPersistedRules(FirewallManager& fm, FirewallMode mode) {
+	const auto path = ResolveListPath(mode);
+	PrintListLocation(mode, path);
+
+	if (!std::filesystem::exists(path)) {
+		std::cout << "[i] No " << ModeLabel(mode) << " file found at " << path << ".\n";
+		return;
 	}
-	std::cout << ".\n";
+
+	std::ifstream probe(path);
+	if (!probe.is_open()) {
+		std::cout << "[!] Could not open " << ModeLabel(mode) << " file at " << path << ".\n";
+		return;
+	}
+	probe.close();
+
+	RemoveRulesForMode(fm, mode);
+	FileLoadStats stats = LoadRulesFromFile(fm, mode, path, /*quietErrors=*/true);
+	PrintAppliedEntriesPreview(stats, mode, path);
+
+	if (stats.applied > 0) {
+		std::cout << "[+] Restored " << stats.applied << ' ' << ModeLabel(mode)
+		          << " entries from " << path << ".\n";
+	} else {
+		std::cout << "[i] " << path << " contained no " << ModeLabel(mode) << " entries to apply.\n";
+	}
+
+	if (stats.failed > 0) {
+		std::cout << "[!] " << stats.failed
+		          << " entries failed to load automatically. Run menu option 3 for detailed errors.\n";
+	}
 }
 
 void ShowRules(FirewallManager& fm) {
@@ -481,6 +699,7 @@ void ClearAllRules(FirewallManager& fm, FirewallMode mode) {
 		std::cout << " Default block filters remain active.";
 	}
 	std::cout << "\n";
+	PersistRulesToDisk(fm, mode);
 }
 
 std::string DescribeBlockedPorts(const RuleEntry& rule) {
@@ -614,7 +833,9 @@ void EditBlockedIP(FirewallManager& fm, const std::string& ipAddress) {
 		}
 
 		if (choice == "1") {
-			fm.BlockIP(ipAddress);
+			if (fm.BlockIP(ipAddress)) {
+				PersistRulesToDisk(fm, FirewallMode::Blacklist);
+			}
 			continue;
 		}
 
@@ -657,7 +878,9 @@ void EditBlockedIP(FirewallManager& fm, const std::string& ipAddress) {
 			}
 
 			if (requestedAll) {
-				fm.BlockIP(ipAddress);
+				if (fm.BlockIP(ipAddress)) {
+					PersistRulesToDisk(fm, FirewallMode::Blacklist);
+				}
 				continue;
 			}
 
@@ -666,8 +889,14 @@ void EditBlockedIP(FirewallManager& fm, const std::string& ipAddress) {
 				continue;
 			}
 
+			bool added = false;
 			for (std::uint16_t portValue : ports) {
-				fm.BlockIP(ipAddress, portValue);
+				if (fm.BlockIP(ipAddress, portValue)) {
+					added = true;
+				}
+			}
+			if (added) {
+				PersistRulesToDisk(fm, FirewallMode::Blacklist);
 			}
 			continue;
 		}
@@ -704,7 +933,9 @@ void EditBlockedIP(FirewallManager& fm, const std::string& ipAddress) {
 				continue;
 			}
 
-			fm.RemovePortBlock(ipAddress, static_cast<std::uint16_t>(value));
+			if (fm.RemovePortBlock(ipAddress, static_cast<std::uint16_t>(value))) {
+				PersistRulesToDisk(fm, FirewallMode::Blacklist);
+			}
 			continue;
 		}
 
@@ -806,6 +1037,8 @@ void EditWhitelistedIP(FirewallManager& fm, const std::string& ipAddress) {
 		if (choice == "1") {
 			if (!fm.WhitelistIP(ipAddress)) {
 				std::cout << "[!] Failed to allow all ports for IP " << ipAddress << ".\n";
+			} else {
+				PersistRulesToDisk(fm, FirewallMode::Whitelist);
 			}
 			continue;
 		}
@@ -821,12 +1054,16 @@ void EditWhitelistedIP(FirewallManager& fm, const std::string& ipAddress) {
 			if (request.allowAll) {
 				if (!fm.WhitelistIP(ipAddress)) {
 					std::cout << "[!] Failed to allow all ports for IP " << ipAddress << ".\n";
+				} else {
+					PersistRulesToDisk(fm, FirewallMode::Whitelist);
 				}
 				continue;
 			}
 
 			if (!fm.AllowPortsForIP(ipAddress, request.ports)) {
 				std::cout << "[!] Failed to add allowed ports.\n";
+			} else {
+				PersistRulesToDisk(fm, FirewallMode::Whitelist);
 			}
 			continue;
 		}
@@ -865,6 +1102,8 @@ void EditWhitelistedIP(FirewallManager& fm, const std::string& ipAddress) {
 
 			if (!fm.RemoveWhitelistPort(ipAddress, static_cast<std::uint16_t>(value))) {
 				std::cout << "[!] Failed to remove allowed port.\n";
+			} else {
+				PersistRulesToDisk(fm, FirewallMode::Whitelist);
 			}
 			continue;
 		}
@@ -872,6 +1111,7 @@ void EditWhitelistedIP(FirewallManager& fm, const std::string& ipAddress) {
 		if (choice == "4") {
 			if (fm.RemoveWhitelistedIP(ipAddress)) {
 				std::cout << "[+] Removed IP " << ipAddress << " from whitelist.\n";
+				PersistRulesToDisk(fm, FirewallMode::Whitelist);
 				return;
 			}
 			std::cout << "[!] Failed to remove IP from whitelist.\n";
